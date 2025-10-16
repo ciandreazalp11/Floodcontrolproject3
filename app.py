@@ -1,11 +1,12 @@
 # app.py
 """
-Dual-dataset Flood vs Weather Analysis Streamlit App
-- Upload Weather dataset (CSV/XLSX)
-- Upload Flood dataset (CSV/XLSX)
-- Shared preprocessing logic
-- Comparison (monthly/yearly), correlation
-- SARIMA forecasting on Weather metric and flood-risk flagging
+Weather vs Flood Comparative Streamlit App (stable)
+- Accepts CSV/XLSX for Weather and Flood datasets
+- Two uploads (weather + flood)
+- Shared preprocessing
+- Safe checks to avoid AttributeError
+- Status badges in sidebar (upload / preprocessing)
+- Comparison, forecasting, summary
 """
 
 import os
@@ -37,7 +38,6 @@ def read_table(file) -> pd.DataFrame:
     Read uploaded CSV/XLSX into DataFrame. Accepts Streamlit UploadedFile or path-like.
     """
     fname = getattr(file, "name", None)
-    # If file is a path string
     if isinstance(file, str):
         fname = file
     if fname is None:
@@ -97,11 +97,10 @@ def preprocess_df(df: pd.DataFrame, date_col=None, main_numeric_col=None, area_c
     if date_col is None or date_col == "None":
         date_col = find_col(['date', 'datetime', 'time', 'day'], cols)
     if main_numeric_col is None or main_numeric_col == "None":
-        # numeric candidate keywords
-        numeric_candidates = ['water', 'level', 'wl', 'depth', 'height', 'rain', 'precip', 'temp', 'temperature', 'humid']
+        numeric_candidates = ['water', 'level', 'wl', 'depth', 'height', 'rain', 'precip', 'temp', 'temperature', 'humid', 'rainfall']
         main_numeric_col = find_col(numeric_candidates, cols)
     if area_col is None or area_col == "None":
-        area_col = find_col(['barangay', 'brgy', 'area', 'location', 'sitio'], cols)
+        area_col = find_col(['barangay', 'brgy', 'area', 'location', 'sitio', 'station'], cols)
 
     # Combine Date/Day/Year if exists
     if 'Date' in df.columns and 'Day' in df.columns and 'Year' in df.columns:
@@ -140,7 +139,6 @@ def preprocess_df(df: pd.DataFrame, date_col=None, main_numeric_col=None, area_c
         except Exception:
             df['is_event'] = df[occurrence_col].notnull()
     else:
-        # heuristic threshold: mean + 1*std OR zscore > 1.5
         threshold = df[main_numeric_col].mean() + 1.0 * df[main_numeric_col].std()
         df['is_event'] = (df[main_numeric_col] >= threshold) | (df['zscore_main'].abs() > 1.5)
 
@@ -234,6 +232,18 @@ st.sidebar.markdown("---")
 st.sidebar.header("2) Options")
 use_example = st.sidebar.checkbox("Use example CSVs in repo if available", value=False)
 show_raw = st.sidebar.checkbox("Show raw previews on preview page", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.header("Status")
+# show simple status badges
+if weather_file is not None or (use_example and os.path.exists('WEATHER DATASET.xlsx')):
+    st.sidebar.success("Weather: uploaded")
+else:
+    st.sidebar.info("Weather: not uploaded")
+if flood_file is not None or (use_example and os.path.exists('cleaned_flood_data.csv')):
+    st.sidebar.success("Flood: uploaded")
+else:
+    st.sidebar.info("Flood: not uploaded")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Navigation")
@@ -388,44 +398,54 @@ elif page == "Preprocessing":
 # 3) Comparison & Analysis
 elif page == "Comparison & Analysis":
     st.header("3. Comparison & Analysis")
-    if st.session_state.weather is None or st.session_state.flood is None:
-        st.warning("Please preprocess both Weather and Flood datasets first.")
-    else:
-        w = st.session_state.weather.copy()
-        f = st.session_state.flood.copy()
-        wmain = st.session_state.weather_main
-        fmain = st.session_state.flood_main
+    # REQUIRE both cleaned datasets to compare
+    if 'weather' not in st.session_state or st.session_state.weather is None:
+        st.warning("Please preprocess the Weather dataset first (Preprocessing page).")
+        st.stop()
+    if 'flood' not in st.session_state or st.session_state.flood is None:
+        st.warning("Please preprocess the Flood dataset first (Preprocessing page).")
+        st.stop()
 
-        st.subheader("A) Time series side-by-side")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Weather time series")
+    # Safe to access now
+    w = st.session_state.weather.copy()
+    f = st.session_state.flood.copy()
+    wmain = st.session_state.weather_main
+    fmain = st.session_state.flood_main
+
+    st.subheader("A) Time series side-by-side")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("Weather time series")
+        try:
             figw = plot_series(w, wmain, title=f"Weather: {wmain}", highlight_events=True)
             st.pyplot(figw)
             figw.savefig(os.path.join(OUTDIR, "weather_timeseries.png"))
-        with col2:
-            st.write("Flood time series")
+        except Exception as e:
+            st.error(f"Failed plotting weather series: {e}")
+    with col2:
+        st.write("Flood time series")
+        try:
             figf = plot_series(f, fmain, title=f"Flood: {fmain}", highlight_events=True)
             st.pyplot(figf)
             figf.savefig(os.path.join(OUTDIR, "flood_timeseries.png"))
+        except Exception as e:
+            st.error(f"Failed plotting flood series: {e}")
 
-        st.subheader("B) Monthly aggregation & correlation")
+    st.subheader("B) Monthly aggregation & correlation (safe alignment)")
+    try:
         w_month = w.resample('M')[wmain].mean().rename('weather_mean')
         f_month = f.resample('M')[fmain].mean().rename('flood_mean')
-        # align index
         common_idx = w_month.index.intersection(f_month.index)
         if len(common_idx) == 0:
-            st.info("No overlapping months between datasets to compare. Try different data or ensure date ranges overlap.")
+            st.info("No overlapping months between datasets to compare. Ensure date ranges overlap.")
         else:
             w_month_a = w_month.loc[common_idx]
             f_month_a = f_month.loc[common_idx]
             df_pair = pd.DataFrame({'weather':w_month_a.values, 'flood':f_month_a.values}, index=common_idx)
             st.write("Monthly aggregated sample:")
             st.dataframe(df_pair.head(50))
-
             corr = df_pair['weather'].corr(df_pair['flood'])
             st.metric("Monthly correlation (weather vs flood)", f"{corr:.3f}")
-
             st.write("Scatter: weather vs flood (monthly mean)")
             fig_sc, ax = plt.subplots(figsize=(6,5))
             ax.scatter(df_pair['weather'], df_pair['flood'])
@@ -435,8 +455,11 @@ elif page == "Comparison & Analysis":
             plt.tight_layout()
             st.pyplot(fig_sc)
             fig_sc.savefig(os.path.join(OUTDIR, "weather_vs_flood_scatter.png"))
+    except Exception as e:
+        st.error(f"Monthly comparison failed: {e}")
 
-        st.subheader("C) Yearly summary comparison")
+    st.subheader("C) Yearly summary comparison (safe)")
+    try:
         w_year = w.groupby('year')[wmain].mean()
         f_year = f.groupby('year')[fmain].mean()
         df_year = pd.DataFrame({'weather_avg': w_year, 'flood_avg': f_year}).dropna()
@@ -448,99 +471,96 @@ elif page == "Comparison & Analysis":
             fig_yy = plot_bar_from_series(df_year['flood_avg'], "Flood Avg per Year", xlabel='Year', ylabel='Flood Avg')
             st.pyplot(fig_yy)
             st.write("Yearly correlation:", df_year['weather_avg'].corr(df_year['flood_avg']))
+    except Exception as e:
+        st.error(f"Yearly comparison failed: {e}")
 
 # 4) Forecasting
 elif page == "Forecasting (Weather)":
     st.header("4. Forecasting (Weather-driven)")
-    if st.session_state.weather is None:
-        st.warning("Please preprocess the Weather dataset first.")
-    else:
-        if not SARIMAX_AVAILABLE:
-            st.error("Forecasting requires 'statsmodels' and 'scikit-learn'. Install them or add to requirements.")
-            st.info("Local install: pip install statsmodels scikit-learn")
-        else:
-            w = st.session_state.weather.copy()
-            wmain = st.session_state.weather_main
-            st.write("Forecasting on:", wmain)
-            train_frac = st.slider("Training fraction for SARIMA", 0.5, 0.95, 0.8)
-            run_fore = st.button("Run Weather SARIMA Forecast")
-            if run_fore:
+    if 'weather' not in st.session_state or st.session_state.weather is None:
+        st.warning("Please preprocess the Weather dataset first (Preprocessing page).")
+        st.stop()
+    if not SARIMAX_AVAILABLE:
+        st.error("Forecasting requires 'statsmodels' and 'scikit-learn'. Install them or add to requirements.")
+        st.info("Local install: pip install statsmodels scikit-learn")
+        st.stop()
+
+    w = st.session_state.weather.copy()
+    wmain = st.session_state.weather_main
+    st.write("Forecasting on:", wmain)
+    train_frac = st.slider("Training fraction for SARIMA", 0.5, 0.95, 0.8)
+    run_fore = st.button("Run Weather SARIMA Forecast")
+    if run_fore:
+        try:
+            with st.spinner("Running SARIMA grid search (short grid)..."):
+                res = run_sarima(w[wmain], train_frac=train_frac, seasonal_period=12)
+            st.success("SARIMA completed")
+            st.write("Best order:", res['order'])
+            st.write("AIC:", float(res['aic']))
+            st.write("MAE:", float(res['mae']), "MSE:", float(res['mse']))
+            # Plot results
+            fig, ax = plt.subplots(figsize=(10,4))
+            ax.plot(res['train'].index, res['train'], label='Train')
+            ax.plot(res['test'].index, res['test'], label='Test')
+            ax.plot(res['forecast'].index, res['forecast'], label='Forecast')
+            ax.set_title("SARIMA: Actual vs Forecast (monthly aggregated)")
+            ax.legend()
+            plt.tight_layout()
+            st.pyplot(fig)
+            fig.savefig(os.path.join(OUTDIR, "weather_sarima_forecast.png"))
+            # Risk flagging (only if flood preprocessed)
+            if 'flood' in st.session_state and st.session_state.flood is not None:
+                f = st.session_state.flood
                 try:
-                    with st.spinner("Running SARIMA grid search (short grid)..."):
-                        res = run_sarima(w[wmain], train_frac=train_frac, seasonal_period=12)
-                    st.success("SARIMA completed")
-                    st.write("Best order:", res['order'])
-                    st.write("AIC:", float(res['aic']))
-                    st.write("MAE:", float(res['mae']), "MSE:", float(res['mse']))
-                    # Plot results
-                    figf, ax = plt.subplots(figsize=(10,4))
-                    ax.plot(res['train'].index, res['train'], label='Train')
-                    ax.plot(res['test'].index, res['test'], label='Test')
-                    ax.plot(res['forecast'].index, res['forecast'], label='Forecast')
-                    ax.set_title("SARIMA: Actual vs Forecast (monthly aggregated)")
-                    ax.legend()
-                    plt.tight_layout()
-                    st.pyplot(figf)
-                    figf.savefig(os.path.join(OUTDIR, "weather_sarima_forecast.png"))
-                    # Risk flagging (if flood dataset present)
-                    if st.session_state.flood is not None:
-                        f = st.session_state.flood
-                        # compute weather level historically associated with floods:
-                        # find months where flood had events and compute median weather in those months
-                        try:
-                            w_month = w.resample('M')[wmain].mean().fillna(0)
-                            f_events_month = f.resample('M')['is_event'].sum()  # flood event counts per month
-                            flood_months = f_events_month[f_events_month > 0].index
-                            if len(flood_months) > 0:
-                                weather_when_floods = w_month.reindex(flood_months).dropna()
-                                risk_threshold = weather_when_floods.median()
-                                st.write("Estimated weather threshold (median weather value on flood months):", float(risk_threshold))
-                                # compare forecast to threshold
-                                forecast_monthly = res['forecast']
-                                risk_months = forecast_monthly[forecast_monthly >= float(risk_threshold)]
-                                if not risk_months.empty:
-                                    st.warning(f"⚠️ Forecast indicates {len(risk_months)} monthly periods where weather >= flood-associated threshold. See forecast plot.")
-                                    st.dataframe(risk_months.reset_index().rename(columns={0:'forecast_value'}))
-                                else:
-                                    st.info("No forecasted months exceed the flood-associated weather threshold.")
+                    w_month = w.resample('M')[wmain].mean().fillna(0)
+                    f_events_month = f.resample('M')['is_event'].sum()
+                    flood_months = f_events_month[f_events_month > 0].index
+                    if len(flood_months) > 0:
+                        weather_when_floods = w_month.reindex(flood_months).dropna()
+                        if not weather_when_floods.empty:
+                            risk_threshold = weather_when_floods.median()
+                            st.write("Estimated weather threshold (median weather value on flood months):", float(risk_threshold))
+                            forecast_monthly = res['forecast']
+                            risk_months = forecast_monthly[forecast_monthly >= float(risk_threshold)]
+                            if not risk_months.empty:
+                                st.warning(f"⚠️ Forecast indicates {len(risk_months)} monthly periods where weather >= flood-associated threshold.")
+                                st.dataframe(risk_months.reset_index().rename(columns={0:'forecast_value'}))
                             else:
-                                st.info("Flood dataset has no monthly events; cannot infer weather threshold for flood risk.")
-                        except Exception as e:
-                            st.error(f"Risk flagging failed: {e}")
+                                st.info("No forecasted months exceed the flood-associated weather threshold.")
+                        else:
+                            st.info("No weather values for flood months to compute threshold.")
+                    else:
+                        st.info("Flood dataset has no monthly events; cannot infer weather threshold for flood risk.")
                 except Exception as e:
-                    st.error(f"Forecast failed: {e}")
+                    st.error(f"Risk flagging failed: {e}")
+        except Exception as e:
+            st.error(f"Forecast failed: {e}")
 
 # 5) Summary & Download
 elif page == "Summary & Download":
     st.header("5. Summary & Download")
-    if st.session_state.weather is None and st.session_state.flood is None:
+    if 'weather' not in st.session_state and 'flood' not in st.session_state:
         st.info("Nothing to summarize. Upload and preprocess datasets first.")
     else:
-        if st.session_state.weather is not None:
+        if 'weather' in st.session_state and st.session_state.weather is not None:
             st.subheader("Weather cleaned dataset")
             st.write("Shape:", st.session_state.weather.shape)
             st.dataframe(st.session_state.weather.head(200))
             st.download_button("Download cleaned weather CSV", data=to_csv_bytes(st.session_state.weather.reset_index()), file_name="weather_cleaned.csv")
-        if st.session_state.flood is not None:
+        if 'flood' in st.session_state and st.session_state.flood is not None:
             st.subheader("Flood cleaned dataset")
             st.write("Shape:", st.session_state.flood.shape)
             st.dataframe(st.session_state.flood.head(200))
             st.download_button("Download cleaned flood CSV", data=to_csv_bytes(st.session_state.flood.reset_index()), file_name="flood_cleaned.csv")
 
-        # Generate summary per year (if both present, show comparison)
-        if st.session_state.weather is not None:
-            w = st.session_state.weather
-            wmain = st.session_state.weather_main
+        # Yearly summary
+        w_summary = pd.DataFrame(); f_summary = pd.DataFrame()
+        if 'weather' in st.session_state and st.session_state.weather is not None:
+            w = st.session_state.weather; wmain = st.session_state.weather_main
             w_summary = w.groupby('year')[wmain].mean().reset_index().rename(columns={wmain:'weather_avg'})
-        else:
-            w_summary = pd.DataFrame()
-
-        if st.session_state.flood is not None:
-            f = st.session_state.flood
-            fmain = st.session_state.flood_main
+        if 'flood' in st.session_state and st.session_state.flood is not None:
+            f = st.session_state.flood; fmain = st.session_state.flood_main
             f_summary = f.groupby('year')[fmain].mean().reset_index().rename(columns={fmain:'flood_avg'})
-        else:
-            f_summary = pd.DataFrame()
 
         if not w_summary.empty or not f_summary.empty:
             summary = pd.merge(w_summary, f_summary, on='year', how='outer').sort_values('year')
@@ -552,4 +572,4 @@ elif page == "Summary & Download":
         st.write(os.listdir(OUTDIR))
 
 st.sidebar.markdown("---")
-st.sidebar.write("App: uploads -> preprocess -> compare -> forecast -> export. Adjust heuristics in preprocessing if detection misfires.")
+st.sidebar.write("App flow: Upload -> Preprocess -> Compare -> Forecast -> Export. If auto-detection misfires, manually select columns during Preprocessing.")
