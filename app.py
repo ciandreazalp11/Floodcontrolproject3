@@ -1,12 +1,11 @@
 # app.py
 """
-Weather vs Flood Comparative Streamlit App (stable)
+Weather vs Flood Comparative Streamlit App (fixed)
 - Accepts CSV/XLSX for Weather and Flood datasets
 - Two uploads (weather + flood)
 - Shared preprocessing
-- Safe checks to avoid AttributeError
-- Status badges in sidebar (upload / preprocessing)
-- Comparison, forecasting, summary
+- Stores DataFrames in session_state (fixes UploadedFile errors)
+- Comparison graphs and safe checks
 """
 
 import os
@@ -36,8 +35,10 @@ except Exception:
 def read_table(file) -> pd.DataFrame:
     """
     Read uploaded CSV/XLSX into DataFrame. Accepts Streamlit UploadedFile or path-like.
+    Always returns a pandas DataFrame.
     """
     fname = getattr(file, "name", None)
+    # If file is a path string
     if isinstance(file, str):
         fname = file
     if fname is None:
@@ -183,7 +184,7 @@ def plot_bar_from_series(series, title, xlabel='period', ylabel='value'):
     plt.tight_layout()
     return fig
 
-# Forecasting
+# Forecasting (same as previous)
 def run_sarima(series, train_frac=0.8, seasonal_period=12):
     if not SARIMAX_AVAILABLE:
         raise RuntimeError("SARIMAX (statsmodels) and sklearn required for forecasting.")
@@ -218,7 +219,7 @@ def run_sarima(series, train_frac=0.8, seasonal_period=12):
     return {'model':best_res, 'order':best_order, 'aic':best_aic, 'train':train, 'test':test, 'forecast':forecast, 'mae':mae, 'mse':mse}
 
 # --------------------
-# Streamlit App UI
+# Streamlit App UI (kept original layout)
 # --------------------
 st.set_page_config(page_title="Weather vs Flood Analysis", layout="wide")
 st.title("🌦️ Weather vs Flood — Comparative Analysis")
@@ -253,7 +254,7 @@ page = st.sidebar.radio("Go to:", ["Upload & Preview", "Preprocessing", "Compari
 OUTDIR = 'flood_weather_outputs'
 os.makedirs(OUTDIR, exist_ok=True)
 
-# Session state initialization
+# Session state initialization (store DataFrames, not UploadedFile)
 if 'weather_raw' not in st.session_state: st.session_state.weather_raw = None
 if 'flood_raw' not in st.session_state: st.session_state.flood_raw = None
 if 'weather' not in st.session_state: st.session_state.weather = None
@@ -284,18 +285,20 @@ if use_example and (weather_file is None and flood_file is None):
         except Exception:
             st.sidebar.warning("Example flood file not found or failed to read")
 
-# If user uploads, read and store raw
+# If user uploads, read into DataFrame and store in session_state.weather_raw / flood_raw
 if weather_file is not None:
     try:
-        st.session_state.weather_raw = read_table(weather_file)
-        st.sidebar.success("Weather file loaded")
+        dfw = read_table(weather_file)  # returns DataFrame
+        st.session_state.weather_raw = dfw
+        st.sidebar.success("Weather file read into DataFrame")
     except Exception as e:
         st.sidebar.error(f"Failed to read weather file: {e}")
 
 if flood_file is not None:
     try:
-        st.session_state.flood_raw = read_table(flood_file)
-        st.sidebar.success("Flood file loaded")
+        dff = read_table(flood_file)
+        st.session_state.flood_raw = dff
+        st.sidebar.success("Flood file read into DataFrame")
     except Exception as e:
         st.sidebar.error(f"Failed to read flood file: {e}")
 
@@ -312,6 +315,7 @@ if page == "Upload & Preview":
         if st.session_state.weather_raw is None:
             st.info("No Weather dataset loaded. Upload via the sidebar or enable example.")
         else:
+            # weather_raw is guaranteed to be a DataFrame here (we read it earlier)
             st.write("Shape:", st.session_state.weather_raw.shape)
             if show_raw:
                 st.dataframe(st.session_state.weather_raw.head(200))
@@ -359,7 +363,9 @@ elif page == "Preprocessing":
                     st.session_state.weather_damage_cols = w_damage_cols
                     st.success("Weather preprocessing done")
                     st.write("Used date:", w_date_used, "Used main numeric:", w_main_used)
-                    st.dataframe(w_proc[[w_date_used, w_main_used, 'is_event', 'zscore_main']].head(200))
+                    # show a small sample
+                    cols_to_show = [c for c in [w_date_used, w_main_used, 'is_event', 'zscore_main'] if c in w_proc.columns]
+                    st.dataframe(w_proc[cols_to_show].head(200))
                 except Exception as e:
                     st.error(f"Weather preprocessing failed: {e}")
 
@@ -391,7 +397,8 @@ elif page == "Preprocessing":
                     st.session_state.flood_damage_cols = f_damage_cols
                     st.success("Flood preprocessing done")
                     st.write("Used date:", f_date_used, "Used main numeric:", f_main_used)
-                    st.dataframe(f_proc[[f_date_used, f_main_used, 'is_event', 'zscore_main']].head(200))
+                    cols_to_show = [c for c in [f_date_used, f_main_used, 'is_event', 'zscore_main'] if c in f_proc.columns]
+                    st.dataframe(f_proc[cols_to_show].head(200))
                 except Exception as e:
                     st.error(f"Flood preprocessing failed: {e}")
 
@@ -406,7 +413,7 @@ elif page == "Comparison & Analysis":
         st.warning("Please preprocess the Flood dataset first (Preprocessing page).")
         st.stop()
 
-    # Safe to access now
+    # Safe to access now (DataFrames)
     w = st.session_state.weather.copy()
     f = st.session_state.flood.copy()
     wmain = st.session_state.weather_main
