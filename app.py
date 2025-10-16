@@ -1,17 +1,15 @@
 # app.py
 """
-Weather vs Flood Comparative Streamlit App (fixed)
-- Accepts CSV/XLSX for Weather and Flood datasets
-- Two uploads (weather + flood)
-- Shared preprocessing
-- Stores DataFrames in session_state (fixes UploadedFile errors)
-- Comparison graphs and safe checks
+Complete Flood & Weather Analysis Streamlit App
+- Upload CSV/XLSX for Weather & Flood
+- Preprocessing with auto-detect columns
+- Comparison, Forecasting, Summary & Download
+- Fully fixed for session_state & widget conflicts
 """
 
 import os
 import warnings
 from io import BytesIO
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -20,7 +18,7 @@ from scipy import stats
 
 warnings.filterwarnings("ignore")
 
-# Optional forecasting libs
+# Forecasting libraries
 try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
     from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -29,11 +27,10 @@ except Exception:
     SARIMAX_AVAILABLE = False
 
 # --------------------
-# Helpers
+# Helper functions
 # --------------------
 @st.cache_data
 def read_table(file) -> pd.DataFrame:
-    """Read uploaded CSV/XLSX into DataFrame"""
     fname = getattr(file, "name", None)
     if isinstance(file, str):
         fname = file
@@ -70,7 +67,6 @@ def read_table(file) -> pd.DataFrame:
         raise e
 
 def find_col(keywords, cols):
-    """Return first column name that contains any keyword (case-insensitive)"""
     cols_lower = [c.lower() for c in cols]
     for k in keywords:
         for i, c in enumerate(cols_lower):
@@ -79,7 +75,6 @@ def find_col(keywords, cols):
     return None
 
 def preprocess_df(df: pd.DataFrame, date_col=None, main_numeric_col=None, area_col=None, damage_candidates=None):
-    """Shared preprocessing logic"""
     df = df.copy()
     cols = df.columns.tolist()
 
@@ -91,10 +86,10 @@ def preprocess_df(df: pd.DataFrame, date_col=None, main_numeric_col=None, area_c
     if area_col is None or area_col == "None":
         area_col = find_col(['barangay', 'brgy', 'area', 'location', 'sitio', 'station'], cols)
 
-    # Combine Date/Day/Year if exists
     if 'Date' in df.columns and 'Day' in df.columns and 'Year' in df.columns:
         df['__combined_date'] = df['Date'].astype(str) + ' ' + df['Day'].astype(str) + ', ' + df['Year'].astype(str)
         date_col = '__combined_date'
+
     if date_col is None:
         df['__date'] = pd.date_range(start='2000-01-01', periods=len(df), freq='D')
         date_col = '__date'
@@ -203,10 +198,14 @@ def run_sarima(series, train_frac=0.8, seasonal_period=12):
 st.set_page_config(page_title="Weather vs Flood Analysis", layout="wide")
 st.title("🌦️ Weather vs Flood — Comparative Analysis")
 
-# Sidebar
+# Sidebar - navigation & uploads
 st.sidebar.header("1) Upload datasets")
-weather_file = st.sidebar.file_uploader("Upload Weather dataset", type=['csv','txt','xlsx','xls'], key='weather')
-flood_file = st.sidebar.file_uploader("Upload Flood dataset", type=['csv','txt','xlsx','xls'], key='flood')
+weather_file = st.sidebar.file_uploader("Upload Weather dataset (CSV or XLSX)", type=['csv','txt','xlsx','xls'], key='weather_file')
+flood_file   = st.sidebar.file_uploader("Upload Flood dataset (CSV or XLSX)", type=['csv','txt','xlsx','xls'], key='flood_file')
+
+st.sidebar.markdown("---")
+st.sidebar.header("2) Options")
+show_raw    = st.sidebar.checkbox("Show raw previews", value=False)
 
 st.sidebar.markdown("---")
 st.sidebar.header("Navigation")
@@ -216,43 +215,26 @@ page = st.sidebar.radio("Go to:", ["Upload & Preview", "Preprocessing", "Compari
 OUTDIR = 'flood_weather_outputs'
 os.makedirs(OUTDIR, exist_ok=True)
 
-# Session state init
-for key in ['weather_raw','flood_raw','weather','flood','weather_main','flood_main','weather_date','flood_date','weather_area','flood_area','weather_damage_cols','flood_damage_cols']:
+# Initialize session_state
+for key in ['weather_raw','flood_raw','weather_df','flood_df',
+            'weather_main','flood_main','weather_date','flood_date',
+            'weather_area','flood_area','weather_damage_cols','flood_damage_cols']:
     if key not in st.session_state:
-        st.session_state[key] = None
-if 'weather_damage_cols' not in st.session_state: st.session_state.weather_damage_cols = []
-if 'flood_damage_cols' not in st.session_state: st.session_state.flood_damage_cols = []
+        st.session_state[key] = None if 'cols' not in key else []
 
-# Read uploaded files
-if weather_file is not None:
-    try:
-        st.session_state.weather_raw = read_table(weather_file)
-        st.sidebar.success("Weather file loaded")
-    except Exception as e:
-        st.sidebar.error(f"Failed to read weather: {e}")
-if flood_file is not None:
-    try:
-        st.session_state.flood_raw = read_table(flood_file)
-        st.sidebar.success("Flood file loaded")
-    except Exception as e:
-        st.sidebar.error(f"Failed to read flood: {e}")
-
-# --------------------
-# Helper to safely access session_state DataFrame
-# --------------------
-def get_df_safe(key: str):
-    df = st.session_state.get(key)
+# Helper to safely get df
+def get_df_safe(name):
+    df = st.session_state.get(name, None)
     if df is None:
-        st.warning(f"{key} not preprocessed yet. Go to Preprocessing page.")
+        st.warning(f"Dataset {name} not available. Please preprocess first.")
         st.stop()
     return df.copy()
 
 # --------------------
-# Pages
-# --------------------
 # 1) Upload & Preview
+# --------------------
 if page == "Upload & Preview":
-    st.header("Upload & Preview")
+    st.header("1. Upload & Preview")
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Weather dataset (raw)")
@@ -260,25 +242,51 @@ if page == "Upload & Preview":
             st.info("No Weather dataset loaded.")
         else:
             st.write("Shape:", st.session_state.weather_raw.shape)
-            st.dataframe(st.session_state.weather_raw.head(50))
+            if show_raw: st.dataframe(st.session_state.weather_raw.head(200))
+            st.download_button("Download Weather raw CSV", data=to_csv_bytes(st.session_state.weather_raw), file_name="weather_raw.csv")
     with col2:
         st.subheader("Flood dataset (raw)")
         if st.session_state.flood_raw is None:
             st.info("No Flood dataset loaded.")
         else:
             st.write("Shape:", st.session_state.flood_raw.shape)
-            st.dataframe(st.session_state.flood_raw.head(50))
+            if show_raw: st.dataframe(st.session_state.flood_raw.head(200))
+            st.download_button("Download Flood raw CSV", data=to_csv_bytes(st.session_state.flood_raw), file_name="flood_raw.csv")
 
+# --------------------
 # 2) Preprocessing
+# --------------------
 elif page == "Preprocessing":
-    st.header("Preprocessing")
+    st.header("2. Preprocessing")
+    if weather_file:
+        try:
+            st.session_state.weather_raw = read_table(weather_file)
+            st.success("Weather file loaded")
+        except Exception as e:
+            st.error(f"Failed to read weather file: {e}")
+    if flood_file:
+        try:
+            st.session_state.flood_raw = read_table(flood_file)
+            st.success("Flood file loaded")
+        except Exception as e:
+            st.error(f"Failed to read flood file: {e}")
+
+    # Weather preprocessing
     if st.session_state.weather_raw is not None:
         st.subheader("Weather preprocessing")
         w_df = st.session_state.weather_raw.copy()
+        w_cols = w_df.columns.tolist()
+        auto_w_date = find_col(['date','datetime','time','day'], w_cols)
+        auto_w_main = find_col(['rain','precip','temp','temperature','humid','rainfall'], w_cols)
+        auto_w_area = find_col(['station','location','area','site'], w_cols)
+        w_date_choice = st.selectbox("Weather: Date column", options=[None]+w_cols, index=(w_cols.index(auto_w_date)+1 if auto_w_date in w_cols else 0), key='w_date')
+        w_main_choice = st.selectbox("Weather: Main numeric", options=[None]+w_cols, index=(w_cols.index(auto_w_main)+1 if auto_w_main in w_cols else 0), key='w_main')
+        w_area_choice = st.selectbox("Weather: Area/Station column", options=[None]+w_cols, index=(w_cols.index(auto_w_area)+1 if auto_w_area in w_cols else 0), key='w_area')
         if st.button("Run Weather Preprocessing"):
             try:
-                w_proc, w_date_used, w_main_used, w_area_used, w_damage_cols = preprocess_df(w_df)
-                st.session_state.weather = w_proc
+                w_proc, w_date_used, w_main_used, w_area_used, w_damage_cols = preprocess_df(
+                    w_df, date_col=w_date_choice, main_numeric_col=w_main_choice, area_col=w_area_choice)
+                st.session_state.weather_df = w_proc
                 st.session_state.weather_date = w_date_used
                 st.session_state.weather_main = w_main_used
                 st.session_state.weather_area = w_area_used
@@ -286,13 +294,23 @@ elif page == "Preprocessing":
                 st.success("Weather preprocessing done")
             except Exception as e:
                 st.error(f"Weather preprocessing failed: {e}")
+
+    # Flood preprocessing
     if st.session_state.flood_raw is not None:
         st.subheader("Flood preprocessing")
         f_df = st.session_state.flood_raw.copy()
+        f_cols = f_df.columns.tolist()
+        auto_f_date = find_col(['date','datetime','time','day'], f_cols)
+        auto_f_main = find_col(['water','level','wl','depth','height'], f_cols)
+        auto_f_area = find_col(['barangay','brgy','area','location','sitio'], f_cols)
+        f_date_choice = st.selectbox("Flood: Date column", options=[None]+f_cols, index=(f_cols.index(auto_f_date)+1 if auto_f_date in f_cols else 0), key='f_date')
+        f_main_choice = st.selectbox("Flood: Main numeric", options=[None]+f_cols, index=(f_cols.index(auto_f_main)+1 if auto_f_main in f_cols else 0), key='f_main')
+        f_area_choice = st.selectbox("Flood: Area column", options=[None]+f_cols, index=(f_cols.index(auto_f_area)+1 if auto_f_area in f_cols else 0), key='f_area')
         if st.button("Run Flood Preprocessing"):
             try:
-                f_proc, f_date_used, f_main_used, f_area_used, f_damage_cols = preprocess_df(f_df)
-                st.session_state.flood = f_proc
+                f_proc, f_date_used, f_main_used, f_area_used, f_damage_cols = preprocess_df(
+                    f_df, date_col=f_date_choice, main_numeric_col=f_main_choice, area_col=f_area_choice)
+                st.session_state.flood_df = f_proc
                 st.session_state.flood_date = f_date_used
                 st.session_state.flood_main = f_main_used
                 st.session_state.flood_area = f_area_used
@@ -301,41 +319,62 @@ elif page == "Preprocessing":
             except Exception as e:
                 st.error(f"Flood preprocessing failed: {e}")
 
+# --------------------
 # 3) Comparison & Analysis
+# --------------------
 elif page == "Comparison & Analysis":
-    st.header("Comparison & Analysis")
-    w = get_df_safe('weather')
-    f = get_df_safe('flood')
+    st.header("3. Comparison & Analysis")
+    w = get_df_safe('weather_df')
+    f = get_df_safe('flood_df')
     wmain = st.session_state.weather_main
     fmain = st.session_state.flood_main
 
     st.subheader("Time series")
     col1, col2 = st.columns(2)
     with col1:
-        figw = plot_series(w, wmain)
-        st.pyplot(figw)
+        st.write("Weather series")
+        st.pyplot(plot_series(w, wmain, highlight_events=True))
     with col2:
-        figf = plot_series(f, fmain)
-        st.pyplot(figf)
+        st.write("Flood series")
+        st.pyplot(plot_series(f, fmain, highlight_events=True))
 
-# 4) Forecasting (Weather)
+# --------------------
+# 4) Forecasting
+# --------------------
 elif page == "Forecasting (Weather)":
-    st.header("Forecasting (Weather-driven)")
-    w = get_df_safe('weather')
+    st.header("4. Forecasting - Weather only")
+    w = get_df_safe('weather_df')
     wmain = st.session_state.weather_main
-    if not SARIMAX_AVAILABLE:
-        st.error("Install statsmodels & sklearn for forecasting.")
+    if SARIMAX_AVAILABLE:
+        if st.button("Run SARIMA Forecasting"):
+            try:
+                result = run_sarima(w[wmain])
+                st.success(f"SARIMA done - AIC: {result['aic']:.2f}")
+                st.write("Forecast plot")
+                fig, ax = plt.subplots(figsize=(10,4))
+                ax.plot(result['train'].index, result['train'], label='Train')
+                ax.plot(result['test'].index, result['test'], label='Test')
+                ax.plot(result['forecast'].index, result['forecast'], label='Forecast')
+                ax.set_title(f"SARIMA Forecast - {wmain}")
+                ax.legend()
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Forecasting failed: {e}")
     else:
-        if st.button("Run Weather SARIMA Forecast"):
-            res = run_sarima(w[wmain])
-            st.write("SARIMA done. AIC:", res['aic'])
+        st.warning("SARIMAX not installed. Forecasting not available.")
 
+# --------------------
 # 5) Summary & Download
+# --------------------
 elif page == "Summary & Download":
-    st.header("Summary & Download")
-    if st.session_state.weather is not None:
-        st.subheader("Weather cleaned dataset")
-        st.dataframe(st.session_state.weather.head(50))
-    if st.session_state.flood is not None:
-        st.subheader("Flood cleaned dataset")
-        st.dataframe(st.session_state.flood.head(50))
+    st.header("5. Summary & Download")
+    w = get_df_safe('weather_df')
+    f = get_df_safe('flood_df')
+
+    st.subheader("Weather Summary")
+    st.write(w.describe())
+    st.download_button("Download Weather Processed CSV", data=to_csv_bytes(w), file_name="weather_processed.csv")
+
+    st.subheader("Flood Summary")
+    st.write(f.describe())
+    st.download_button("Download Flood Processed CSV", data=to_csv_bytes(f), file_name="flood_processed.csv")
